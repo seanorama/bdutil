@@ -32,7 +32,7 @@ import_env hadoop2_env.sh
 # Default to 4 workers plus master for good spreading of master daemons.
 NUM_WORKERS=4
 # Use CentOS instead of Debian.
-GCE_IMAGE='centos-6'
+GCE_IMAGE='https://www.googleapis.com/compute/v1/projects/centos-cloud/global/images/centos-6-v20160526'
 
 # Create attached storage
 USE_ATTACHED_PDS=true
@@ -40,6 +40,11 @@ USE_ATTACHED_PDS=true
 # maximum I/O per VM.
 WORKER_ATTACHED_PDS_SIZE_GB=1500
 MASTER_ATTACHED_PD_SIZE_GB=1500
+
+## Amount of storage to give the boot disk.
+## A full HDP stack starts to fill up 10 GB.
+MASTER_BOOT_DISK_SIZE_GB=${MASTER_BOOT_DISK_SIZE_GB:-50}
+WORKER_BOOT_DISK_SIZE_GB=${MASTER_BOOT_DISK_SIZE_GB:-50}
 
 # Install the full Java JDK. Most services need it
 INSTALL_JDK_DEVEL=true
@@ -49,8 +54,8 @@ JAVA_HOME=/etc/alternatives/java_sdk
 import_env platforms/hdp/ambari.conf
 
 ## Version of Ambari and location of YUM package repository
-AMBARI_VERSION="${AMBARI_VERSION:-1.7.0}"
-AMBARI_REPO=${AMBARI_REPO:-http://public-repo-1.hortonworks.com/ambari/centos6/1.x/updates/${AMBARI_VERSION}/ambari.repo}
+AMBARI_VERSION="${AMBARI_VERSION:-2.2.1.0}"
+AMBARI_REPO=${AMBARI_REPO:-http://public-repo-1.hortonworks.com/ambari/centos6/${AMBARI_VERSION:0:1}.x/updates/${AMBARI_VERSION}/ambari.repo}
 
 ## If 'true', URLs for web interfaces, such as the jobtracker will below
 ## linked from Ambari with the public IP.
@@ -70,7 +75,7 @@ HADOOP_INSTALL_DIR="/usr/local/lib/hadoop"
 
 # For interacting with Ambari Server API
 AMBARI_API="http://localhost:8080/api/v1"
-AMBARI_CURL='curl -su admin:admin -H X-Requested-By:ambari'
+AMBARI_CURL='curl -fsSu admin:admin -H X-Requested-By:ambari'
 MASTER_UI_PORTS=('8080')
 
 import_env platforms/hdp/ambari_functions.sh

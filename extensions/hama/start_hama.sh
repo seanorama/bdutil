@@ -1,5 +1,4 @@
-# Copyright 2013 Google Inc. All Rights Reserved.
-#
+# Copyright 2014 Google Inc. All Rights Reserved.  #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,12 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file contains environment-variable overrides to be used in conjunction
-# with bdutil_env.sh in order to deploy a datastore-enabled Hadoop cluster.
-# Usage: bdutil deploy datastore_env.sh
+set -o nounset
+set -o errexit
 
-GCE_SERVICE_ACCOUNT_SCOPES+=('userinfo-email' 'datastore')
-
-# Whether or not to install and configure the Datastore connector.
-INSTALL_DATASTORE_CONNECTOR=true
-
+sudo -u hadoop ${HAMA_INSTALL_DIR}/bin/start-bspd.sh

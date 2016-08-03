@@ -22,20 +22,17 @@ NUM_WORKERS=1
 # JDK with compiler/tools instead of just the minimal JRE.
 INSTALL_JDK_DEVEL=true
 
+# Save away the base evaluate_late_variable_bindings function so we can
+# override it.
+copy_func evaluate_late_variable_bindings old_evaluate_late_variable_bindings
+
 function evaluate_late_variable_bindings() {
-  normalize_boolean 'STRIP_EXTERNAL_MIRRORS'
-  normalize_boolean 'ENABLE_HDFS'
-  normalize_boolean 'INSTALL_GCS_CONNECTOR'
-  normalize_boolean 'INSTALL_BIGQUERY_CONNECTOR'
-  normalize_boolean 'INSTALL_DATASTORE_CONNECTOR'
-  normalize_boolean 'USE_ATTACHED_PDS'
-  normalize_boolean 'CREATE_ATTACHED_PDS_ON_DEPLOY'
-  normalize_boolean 'DELETE_ATTACHED_PDS_ON_DELETE'
-  normalize_boolean 'VERBOSE_MODE'
-  normalize_boolean 'DEBUG_MODE'
-  normalize_boolean 'OLD_HOSTNAME_SUFFIXES'
-  normalize_boolean 'ENABLE_NFS_GCS_FILE_CACHE'
-  normalize_boolean 'INSTALL_JDK_DEVEL'
+  # Stash away the old value here so we can differentiate between whether the
+  # user overrides set it or we just resolved it in the base implementation
+  # of evaluate_late_variable_bindings.
+  local old_nfs_master_hostname="${GCS_CACHE_MASTER_HOSTNAME}"
+
+  old_evaluate_late_variable_bindings
 
   # In the case of the single-node cluster, we'll just use the whole PREFIX
   # as the name of the master and worker.
@@ -53,6 +50,12 @@ function evaluate_late_variable_bindings() {
   # GCS directory for deployment-related temporary files.
   local staging_dir_base="gs://${CONFIGBUCKET}/bdutil-staging"
   BDUTIL_GCS_STAGING_DIR="${staging_dir_base}/${MASTER_HOSTNAME}"
+
+  # Default NFS cache host is the master node, but it can be overriden to point
+  # at an NFS server off-cluster.
+  if [[ -z "${old_nfs_master_hostname}" ]]; then
+    GCS_CACHE_MASTER_HOSTNAME="${MASTER_HOSTNAME}"
+  fi
 
   # Since $WORKERS and $MASTER_HOSTNAME both refer to the same single-node
   # VM, we must override COMMAND_STEPS to prevent duplicating steps. We also

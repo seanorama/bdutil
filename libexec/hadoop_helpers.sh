@@ -174,17 +174,18 @@ function get_hdfs_superuser() {
 
 # Create and configure Hadoop2 specific HDFS directories.
 function initialize_hdfs_dirs() {
+  local extra_users="$@"
   local hdfs_superuser=$(get_hdfs_superuser)
   local dfs_cmd="sudo -i -u ${hdfs_superuser} hadoop fs"
   loginfo "Setting up HDFS /tmp directories."
   if ! ${dfs_cmd} -stat /tmp ; then
-    ${dfs_cmd} -mkdir -p /tmp/hadoop-yarn/history
-    ${dfs_cmd} -mkdir -p /tmp/hadoop-yarn/staging
+    ${dfs_cmd} -mkdir -p /tmp/hadoop-yarn/staging/history
   fi
   ${dfs_cmd} -chmod -R 1777 /tmp
 
   loginfo "Setting up HDFS /user directories."
-  for USER in $(getent passwd | grep '/home' | cut -d ':' -f 1); do
+  for USER in $(getent passwd | grep '/home' | cut -d ':' -f 1) ${extra_users};
+  do
     if ! ${dfs_cmd} -stat /user/${USER}; then
       loginfo "Creating HDFS directory for user '${USER}'"
       ${dfs_cmd} -mkdir -p "/user/${USER}"

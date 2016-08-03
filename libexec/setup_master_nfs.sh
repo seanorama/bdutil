@@ -15,7 +15,8 @@
 # Installs NFS packages and exports on the master.
 
 if (( ${INSTALL_GCS_CONNECTOR} )) && \
-   (( ${ENABLE_NFS_GCS_FILE_CACHE} )) ; then
+   (( ${ENABLE_NFS_GCS_FILE_CACHE} )) && \
+   [[ "$(hostname -s)" == "${GCS_CACHE_MASTER_HOSTNAME}" ]] ; then
   # Set up the GCS_ADMIN user.
   setup_gcs_admin
 
@@ -57,6 +58,12 @@ if (( ${INSTALL_GCS_CONNECTOR} )) && \
   if [[ -f /usr/lib/systemd/system/nfs-server.service ]] \
       && which systemctl; then
     # Centos 7
+    if ! service rpcbind status; then
+      echo "Warning: rpcbind broken, trying to fix by installing avahi..." >&2
+      install_application "avahi-daemon" "avahi"
+      service rpcbind restart
+    fi
+
     SERVICE='nfs-server'
     systemctl enable ${SERVICE}
   elif [[ -x /etc/init.d/nfs ]] \
@@ -83,12 +90,18 @@ if (( ${INSTALL_GCS_CONNECTOR} )) && \
 
   # Lower grace times for lock re-acquisition post-NFS-restart.
   # This setting is not sticky across boot.
-  run_with_retries \
-      overwrite_file_with_strings '/proc/sys/fs/nfs/nlm_grace_period' '10'
-  run_with_retries \
-      overwrite_file_with_strings '/proc/fs/nfsd/nfsv4gracetime' '10'
-  run_with_retries \
-      overwrite_file_with_strings '/proc/fs/nfsd/nfsv4leasetime' '10'
+  if [[ -e '/proc/sys/fs/nfs/nlm_grace_period' ]]; then
+    run_with_retries \
+        overwrite_file_with_strings '/proc/sys/fs/nfs/nlm_grace_period' '10'
+  fi
+  if [[ -e '/proc/fs/nfsd/nfsv4gracetime' ]]; then
+    run_with_retries \
+        overwrite_file_with_strings '/proc/fs/nfsd/nfsv4gracetime' '10'
+  fi
+  if [[ -e '/proc/fs/nfsd/nfsv4leasetime' ]]; then
+    run_with_retries \
+        overwrite_file_with_strings '/proc/fs/nfsd/nfsv4leasetime' '10'
+  fi
 
   service "${SERVICE}" start
 fi

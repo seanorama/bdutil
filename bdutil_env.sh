@@ -35,13 +35,27 @@ PROJECT=""
 # example, to whitelist intra-cluster SSH using the cluster prefix.
 
 # GCE settings.
-GCE_IMAGE='debian-7-backports'
+GCE_IMAGE='https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/backports-debian-7-wheezy-v20160531'
 GCE_MACHINE_TYPE='n1-standard-4'
-GCE_ZONE='us-central1-a'
+GCE_ZONE=""
 # When setting a network it's important for all nodes be able to communicate
 # with eachother and for SSH connections to be allowed inbound to complete
 # cluster setup and configuration.
 GCE_NETWORK='default'
+
+# If non-empty, specifies the machine type for the master node separately from
+# worker nodes. If empty, defaults to using the same machine type as workers
+# specified in GCE_MACHINE_TYPE.
+GCE_MASTER_MACHINE_TYPE=''
+
+# Specifies a comma-separated list of tags to apply to the instances for
+# identifying the instances to which network firewall rules will apply.
+# Cannot be empty, so the default is 'bdutil'.
+GCE_TAGS='bdutil'
+
+# If non-zero, specifies the fraction (between 0.0 and 1.0) of worker
+# nodes that should be run as preemptible VMs.
+PREEMPTIBLE_FRACTION=0.0
 
 # Prefix to be shared by all VM instance names in the cluster, as well as for
 # SSH configuration between the JobTracker node and the TaskTracker nodes.
@@ -84,6 +98,15 @@ WORKER_ATTACHED_PDS_TYPE='pd-standard'
 # either 'pd-standard' or 'pd-ssd', to create for the master node.
 MASTER_ATTACHED_PD_TYPE='pd-standard'
 
+# The size of the master boot disk.
+MASTER_BOOT_DISK_SIZE_GB=
+
+# Number of local SSD devices to attach to each worker node, in range [0, 4].
+WORKER_LOCAL_SSD_COUNT=0
+
+# Number of local SSD devices to attach to the master node, in range [0, 4].
+MASTER_LOCAL_SSD_COUNT=0
+
 # Bash array of service-account scopes to include in the created VMs.
 # List of available scopes can be obtained with 'gcloud compute instances create --help'
 # and looking under the description for "--scopes". Must at least include
@@ -100,6 +123,16 @@ WORKERS=()
 # unchanged if in doubt.
 WORKER_ATTACHED_PDS=()
 
+# The size of the worker boot disks.
+WORKER_BOOT_DISK_SIZE_GB=
+
+# Useful setting for extensions which want to operate exclusively on pools of
+# workers; if this is set to true, all actions that normally would be performed
+# on the master or related directly to the master are skipped, such as creating
+# the master instance, creating master disks, running commands on the master,
+# deleting the master, deleting master disks, etc.
+SKIP_MASTER=false
+
 ###############################################################################
 
 #################### Deployment/Software Configuration ########################
@@ -112,9 +145,6 @@ INSTALL_GCS_CONNECTOR=true
 
 # Whether or not to install and configure the BigQuery connector.
 INSTALL_BIGQUERY_CONNECTOR=false
-
-# Whether or not to install and configure the Datastore connector.
-INSTALL_DATASTORE_CONNECTOR=false
 
 # Whether or not to configure and start HDFS
 # Must be true if DEFAULT_FS is hdfs
@@ -131,6 +161,13 @@ DEFAULT_FS='gs'
 # provides better support for multi-stage workflows that depend on immediate
 # list-after-write consistency.
 ENABLE_NFS_GCS_FILE_CACHE=true
+
+# If set, uses the provided hostname for the NFS-based GCS consistency cache
+# rather than assuming the master on the cluster is always the cache server.
+# This allows a standalone cache (optionally createed with the bdutil-provided
+# standalone_nfs_cache_env.sh) to be used cross-cluster. If unset, defaults
+# to using the master of the cluster as the cache server.
+GCS_CACHE_MASTER_HOSTNAME=''
 
 # User to create which owns the directories used by the NFS GCS file cache
 # and potentially other gcs-connector-related tasks.
@@ -167,13 +204,10 @@ CORES_PER_REDUCE_TASK=1.0
 JAVAOPTS='-Xms1024m -Xmx2048m'
 
 # Complete URL for downloading the GCS Connector JAR file.
-GCS_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/gcs/gcs-connector-1.3.2-hadoop1.jar'
+GCS_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/gcs/gcs-connector-1.5.0-hadoop1.jar'
 
 # Complete URL for downloading the BigQuery Connector JAR file.
-BIGQUERY_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/bigquery/bigquery-connector-0.5.1-hadoop1.jar'
-
-# Complete URL for downloading the Cloud Datastore Connector JAR file.
-DATASTORE_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/datastore/datastore-connector-0.14.9-hadoop1.jar'
+BIGQUERY_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/bigquery/bigquery-connector-0.7.6-hadoop1.jar'
 
 # Complete URL for downloading the configuration script.
 BDCONFIG='https://storage.googleapis.com/hadoop-tools/bdconfig/bdconfig-0.28.1.tar.gz'
@@ -265,6 +299,16 @@ function normalize_boolean() {
   fi
 }
 
+# Helper to copy an existing function definition to a new function name;
+# allowing the original function name to be overridden but still able to
+# delegate to the original definition, e.g. for "extending" the function.
+# Usage: copy_func existing_function new_function_name
+function copy_func() {
+  local orig=$(declare -f ${1})
+  local new_function_def_str="function ${2} ${orig#${1}}"
+  eval "${new_function_def_str}"
+}
+
 # Overridable function which will be called after sourcing all provided env
 # files in sequence; allows environment variables which are derived from other
 # variables to reflect overrides introduced in other files. For example, by
@@ -285,6 +329,7 @@ function evaluate_late_variable_bindings() {
   normalize_boolean 'OLD_HOSTNAME_SUFFIXES'
   normalize_boolean 'ENABLE_NFS_GCS_FILE_CACHE'
   normalize_boolean 'INSTALL_JDK_DEVEL'
+  normalize_boolean 'SKIP_MASTER'
 
   # Generate WORKERS array based on PREFIX and NUM_WORKERS.
   local worker_suffix='w'
@@ -294,6 +339,12 @@ function evaluate_late_variable_bindings() {
     worker_suffix='dn'
     master_suffix='nn'
   fi
+
+  # Compute NUM_PREEMPTIBLE as int(PREEMPTIBLE_FRACTION * NUM_WORKERS)
+  local frac=$PREEMPTIBLE_FRACTION
+  local n=$NUM_WORKERS
+  NUM_PREEMPTIBLE=$(echo | awk -v n1=$frac -v n2=$n '{printf("%d", n1 * n2);}')
+
   for ((i = 0; i < NUM_WORKERS; i++)); do
     WORKERS[${i}]="${PREFIX}-${worker_suffix}-${i}"
   done
@@ -320,13 +371,22 @@ function evaluate_late_variable_bindings() {
   # GCS directory for deployment-related temporary files.
   local staging_dir_base="gs://${CONFIGBUCKET}/bdutil-staging"
   BDUTIL_GCS_STAGING_DIR="${staging_dir_base}/${MASTER_HOSTNAME}"
+
+  # Default NFS cache host is the master node, but it can be overriden to point
+  # at an NFS server off-cluster.
+  if [[ -z "${GCS_CACHE_MASTER_HOSTNAME}" ]]; then
+    GCS_CACHE_MASTER_HOSTNAME="${MASTER_HOSTNAME}"
+  fi
 }
 
-# Helper to allow env_file dependency
+# Helper to allow env_file dependency. Relative paths are resolved relative to
+# BDUTIL_DIR, absolute paths taken as-is.
 function import_env() {
   local env_file=$1
   if [[ -n "${BDUTIL_DIR}" ]]; then
-    env_file=${BDUTIL_DIR}/${env_file}
+    if [[ ! "${env_file}" =~ ^/ ]]; then
+      env_file=${BDUTIL_DIR}/${env_file}
+    fi
   else
     env_file=$(basename ${env_file})
   fi
@@ -371,7 +431,6 @@ COMMAND_GROUPS=(
      libexec/configure_hadoop.sh
      libexec/install_and_configure_gcs_connector.sh
      libexec/install_and_configure_bigquery_connector.sh
-     libexec/install_and_configure_datastore_connector.sh
      libexec/configure_hdfs.sh
      libexec/set_default_fs.sh
      libexec/configure_startup_processes.sh
@@ -399,7 +458,6 @@ COMMAND_GROUPS=(
      libexec/install_bdconfig.sh
      libexec/install_and_configure_gcs_connector.sh
      libexec/install_and_configure_bigquery_connector.sh
-     libexec/install_and_configure_datastore_connector.sh
      libexec/set_default_fs.sh
   "
 )

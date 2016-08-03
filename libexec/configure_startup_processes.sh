@@ -36,7 +36,9 @@ if [[ "$(hostname -s)" == "${MASTER_HOSTNAME}" ]]; then
   else
     HADOOP_DAEMONS+=('yarn-resourcemanager' 'mapreduce-historyserver')
   fi
-else
+fi
+
+if [[ "$(hostname -s)" != "${MASTER_HOSTNAME}" ]] || is_single_node_setup; then
   if (( ${ENABLE_HDFS} )); then
     HADOOP_DAEMONS+=('hdfs-datanode')
   fi
@@ -124,6 +126,9 @@ EOF
     insserv ${INIT_SCRIPT}
   elif which chkconfig; then
     chkconfig --add hadoop-${DAEMON}
+  elif [[ -x /usr/lib/insserv/insserv ]]; then
+    ln -s /usr/lib/insserv/insserv /sbin/insserv
+    insserv ${INIT_SCRIPT}
   else
     echo "No boot process configuration tool found." >&2
     exit 1

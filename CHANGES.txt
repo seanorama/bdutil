@@ -1,4 +1,139 @@
-1.1.1 - 2015-xx-xx
+1.3.4 - 2016-02-02
+
+  1. Updated bigtable version numbers.
+  2. Fixed handling of capacity scheduler parameters when using hdp.
+
+
+1.3.3 - 2015-11-12
+
+  1. Added support for Apache Tajo via pull-request:
+     https://github.com/GoogleCloudPlatform/bdutil/pull/67
+  2. The YARN capacity scheduler can now be configured when deploying a
+     cluster: https://github.com/GoogleCloudPlatform/bdutil/pull/64
+
+
+1.3.2 - 2015-09-15
+
+  1. Updated Spark configurations to make Cloud Bigtable work with Spark.
+  2. Added wrappers bigtable-spark-shell and bigtable-spark-submit to use
+     with bigtable plugin; only installed if bigtable_env.sh is used.
+  3. Updated default Hadoop 2 version to 2.7.1.
+  4. Added support for Apache Hama.
+  5. Added support for setting up a standalone NFS cache server for GCS
+     consistency using standalone_nfs_cache_env.sh, along with configurable
+     GCS_CACHE_MASTER_HOSTNAME to point subsequent clusters at the shared
+     NFS cache server. See standalone_nfs_cache_env.sh for usage.
+  6. Added explicit check for ordering of imports spark_env.sh relative
+     to bigtable_env.sh; Spark must come before Bigtable.
+  7. Fixed spelling of "amount" in some documentation.
+  8. Fixed directory resolution to bdutil when using symlinks.
+  9. Added Dockerfile for bdutil.
+  10. Updated default Spark version to 1.5.0; for Spark 1.5.0+, core-site.xml
+      will also set 'fs.gs.reported.permissions' to 733, otherwise the Hive
+      1.2.1 will error out when using SparkSQL. Hadoop MapReduce will print
+      a harmless warning in this case, but otherwise works fine. Additionally,
+      Spark auto-restart configuration now contains logic to use correct
+      syntax for start-slave.sh depending on whether it's Spark 1.4+, and
+      Spark auto-restarted daemons now correctly run under user 'hadoop'.
+
+
+1.3.1 - 2015-07-09
+
+  1. Added plugin for deploying MapR under platforms/mapr/mapr_env.sh; see
+     platforms/mapr/README.md for details.
+  2. Changed mapreduce.fileoutputcommitter.algorithm.version to "2"; this should
+     only have an effect when running with Hadoop 2.7+, where it significantly
+     speeds up job-commit time when using the GCS connector.
+     See https://issues.apache.org/jira/browse/MAPEDUCE-4815 for more details.
+  3. Added an option ENABLE_STORM_BIGTABLE to extensions/storm/storm_env.sh to
+     set up using Google Cloud Bigtable from Apache Storm.
+  4. Updated Flink version to 0.9.0.
+  5. Switched from using SPARK_CLASSPATH to using SPARK_DIST_CLASSPATH pointed
+     at the Hadoop classpath to inherit gcs-connector and other Hadoop libraries
+     on the default Spark classpath. This gets rid of a warning message about
+     SPARK_CLASSPATH deprecation when running Spark, and improves access to
+     related Hadoop libraries from Spark jobs.
+  6. Fixed reboot recovery for single-node clusters; this includes the ability
+     for single-node clusters to recover from issuing "Stop" and then "Start"
+     commands via the GCE API.
+  7. Added explicit value for mapreduce.job.working.dir in Ambari config; this
+     works around a bug in PigInputFormat where an exception is thrown with
+     "Wrong FS scheme" when the default filesystem doesn't have the same scheme
+     as the filesystem of the input file(s) (e.g. when reading GCS files and
+     the default FS is HDFS). Pig reading from GCS should now work in ambari
+     bdutil deployments.
+  8. Fixed a bug where Hive deployed under ambari_env.sh is unable to
+     LOAD DATA INPATH 'gs://<...>' due to Hive server needing to be restarted
+     after GCS connector installation to pick it up on its classpath.
+
+
+1.3.0 - 2015-05-27
+
+  1. Upgraded default Hadoop 2 version to 2.6.0.
+  2. Added support for making a portion of worker VMs run as "preemptible vms"
+     by setting --preemptible or PREEMPTIBLE_FRACTION to a value between
+     0.0 and 1.0 to specify the fraction of workers to run as preemptible.
+  3. Added support for deploying onto ubuntu-12-04 or ubuntu-14-04 images.
+  4. Added support for specifying boot disk sizes via --master_boot_disk_size_gb
+     and --worker_boot_disk_size_gb or MASTER_BOOT_DISK_SIZE_GB and
+     WORKER_BOOT_DISK_SIZE_GB; uses default derived from base image if unset.
+  5. Upgraded default Spark version to 1.3.1.
+  6. Removed datastore-connector installation options and samples; the connector
+     has been deprecated since February 17th, 2015. For alternatives see:
+     https://groups.google.com/forum/#!topic/gcp-hadoop-announce/D3_OZuqn4_o
+  7. Added workaround for a bug where ambari_env.sh and ambari_manual_env.sh
+     would fail to copy mapreduce.tar.gz, pig.tar.gz, etc., into
+     hdfs:///hdp/apps/... during setup. Ambari should now work out-of-the-box.
+
+
+1.2.1 - 2015-05-05
+
+  1. Install Java JDK with Spark; this allows spark-sql to correctly run
+     out-of-the-box.
+  2. New --master_machine_type/-M flag for setting a different master
+     machine type vs worker machine type.
+  3. Updated default Spark version to 1.3.0; SparkSQL scripts may need
+     modifications to use the new DataFrames; see Spark's migration guide:
+     http://spark.apache.org/docs/1.3.0/sql-programming-guide.html#migration-guide
+  4. Fixed CentOS 7 support.
+  5. Added basic support for using local SSDs via --master_local_ssd_count
+     and --worker_local_ssd_count.
+  6. Removed default zone, trying to get default zone from gcloud instead or
+     otherwise requiring an explicit zone setting.
+  7. Fixed JobHistory permissions on HDFS.
+  8. Added new extension: extensions/bigtable/bigtable_env.sh for deploying
+     a cluster with the HBase-compatible connector for Google Cloud Bigtable
+     installed.
+
+
+1.2.0 - 2015-02-26
+
+  1. Fixed reboots on CentOS 7.
+  2. Fixed Ambari-plugin support of reusing persistent disks across deployments.
+  3. Added support for Apache Flink.
+  4. Made all UPLOAD_FILES be relative to the bdutil directory.
+  5. Added basic HBase, CDH, and Storm plugins for bdutil.
+         ./bdutil -e hbase
+         ./bdutil -e cdh
+         ./bdutil -e storm
+  6. Only symlink the GCS connector for Client nodes.
+  7. Fixed memory allocation for Spark executors running on YARN; Created
+     extension extensions/spark/spark_on_yarn_env.sh to support Spark
+     on YARN without Spark daemons. the combination of spark_env.sh and
+     hadoop2_env.sh will allow the user to submit Spark Jobs to either the
+     Spark Master or YARN.
+  8. Enabled restart spark processes on reboot.
+  9. Added support for the GCS connector with ambari_manual_env.sh. See
+     the "Can I deploy HDP manually using Ambari" section in
+     platforms/hdp/README.md
+  10. Added an experimental env file to enable cluster resizing.
+        See extensions/google/experimental/resize_env.sh.
+  11. Updated default Spark version to 1.2.1.
+  12. Updated Spark driver memory settings to scale with VM size.
+  13. Added import_env support to generate_config.  For example:
+        "./bdutil -e spark -b my-bucket -p my-project generate_config my_env.sh"
+        makes my_env.sh contain "import_env /path/to/spark_env.sh".
+  14. Use default mount options to avoid SELinux issues on reboot.
 
 
 1.1.0 - 2015-01-22

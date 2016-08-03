@@ -18,7 +18,7 @@ GCS_CACHE_CLEANER_LOGGER='INFO,RFA'
 
 # URI of Hadoop tarball to be deployed. Must begin with gs:// or http(s)://
 # Use 'gsutil ls gs://hadoop-dist/hadoop-*.tar.gz' to list Google supplied options
-HADOOP_TARBALL_URI="gs://hadoop-dist/hadoop-2.5.2.tar.gz"
+HADOOP_TARBALL_URI="gs://hadoop-dist/hadoop-2.7.1.tar.gz"
 
 # Directory holding config files and scripts for Hadoop
 HADOOP_CONF_DIR="${HADOOP_INSTALL_DIR}/etc/hadoop"
@@ -44,17 +44,19 @@ CORES_PER_REDUCE_TASK=2.0
 CORES_PER_APP_MASTER=2.0
 
 # Connector with Hadoop AbstractFileSystem implemenation for YARN
-GCS_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/gcs/gcs-connector-1.3.2-hadoop2.jar'
+GCS_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/gcs/gcs-connector-1.5.0-hadoop2.jar'
 
-DATASTORE_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/datastore/datastore-connector-0.14.9-hadoop2.jar'
-
-BIGQUERY_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/bigquery/bigquery-connector-0.5.1-hadoop2.jar'
+BIGQUERY_CONNECTOR_JAR='https://storage.googleapis.com/hadoop-lib/bigquery/bigquery-connector-0.7.6-hadoop2.jar'
 
 
 HDFS_DATA_DIRS_PERM='700'
 
 # 8088 for YARN, 50070 for HDFS.
 MASTER_UI_PORTS=('8088' '50070')
+
+# Allow to tune the YARN scheduler to
+YARN_SCHEDULER_CAPACITY_MAXIMUM_APPLICATIONS=10000
+YARN_SCHEDULER_CAPACITY_MAX_AM_PERCENT=0.2
 
 # Use Hadoop 2 specific configuration templates.
 if [[ -n "${BDUTIL_DIR}" ]]; then

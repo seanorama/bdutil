@@ -20,7 +20,7 @@
 #
 # Usage: ./bdutil [deploy|delete] [optional: <paths to env files>]...
 
-BDUTIL_VERSION='1.1.1-SNAPSHOT'
+BDUTIL_VERSION='1.3.5-SNAPSHOT'
 
 # Prints the usage for this script and exits.
 function print_usage() {
@@ -69,6 +69,12 @@ Flags:
   -m, --machine_type
     Specify the Google Compute Engine machine type to use.
 
+  --master_boot_disk_size_gb
+    The size of the master boot disk.
+
+  -M, --master_machine_type
+    Specify the Google Compute Engine machine type for the master node.
+
   --master_attached_pd_size_gb
     Only applicable during deployment if USE_ATTACHED_PDS is true and
     CREATE_ATTACHED_PDS_ON_DEPLOY is true. Specifies the size, in GB, of
@@ -78,6 +84,9 @@ Flags:
     Only applicable during deployment if USE_ATTACHED_PDS is true and
     CREATE_ATTACHED_PDS_ON_DEPLOY is true. Specifies the disk type,
     either 'pd-standard' or 'pd-ssd', to create for the master node.
+
+  --master_local_ssd_count
+    Number of local SSD devices to attach to the master node, in range [0, 4].
 
   --network
     Specify a network name with which to associate new virtual machines.
@@ -90,6 +99,9 @@ Flags:
     instead of the new $PREFIX-master and $PREFIX-worker-$i. Should only be
     used if necessary for interacting with older existing clusters,
     as the old naming scheme is deprecated and will eventually be removed.
+
+  --preemptible
+    The fraction (between 0.0 and 1.0) of worker nodes to run as preemptible.
 
   -P, --prefix
     Common prefix for cluster nodes.
@@ -116,6 +128,12 @@ Flags:
     Only applicable during deployment if USE_ATTACHED_PDS is true and
     CREATE_ATTACHED_PDS_ON_DEPLOY is true. Specifies the disk type,
     either 'pd-standard' or 'pd-ssd', to create for the worker nodes.
+
+  --worker_local_ssd_count
+    Number of local SSD devices to attach to each worker node, in range [0, 4].
+
+  --worker_boot_disk_size_gb
+    The size of the worker boot disks.
 
   -z, --zone
     Specify the Google Compute Engine zone to use.
@@ -166,8 +184,8 @@ socksproxy           Create a SOCKS proxy running through the master node.
 
 Examples:
 
-  Deploy a 5-worker cluster with prefix 'my-cluster' and BigQuery/Datastore installed:
-  ./bdutil -b foo-bucket -n 5 -P my-cluster -e bigquery_env.sh,datastore_env.sh deploy
+  Deploy a 5-worker cluster with prefix 'my-cluster' and BigQuery installed:
+  ./bdutil -b foo-bucket -n 5 -P my-cluster -e bigquery_env.sh deploy
 
   Pipe hadoop-validate-setup.sh into a bash shell on the cluster's master node:
   ./bdutil -P my-cluster shell < ./hadoop-validate-setup.sh
@@ -321,6 +339,8 @@ function prompt_confirmation() {
       GCE_IMAGE='${GCE_IMAGE?}'
       GCE_ZONE='${GCE_ZONE?}'
       GCE_NETWORK='${GCE_NETWORK?}'
+      GCE_TAGS='${GCE_TAGS?}'
+      PREEMPTIBLE_FRACTION=${PREEMPTIBLE_FRACTION?}
       PREFIX='${PREFIX?}'
       NUM_WORKERS=${NUM_WORKERS?}
       MASTER_HOSTNAME='${MASTER_HOSTNAME}'
@@ -388,6 +408,7 @@ function run_gcloud_compute_cmd() {
   # Add global flags
   gcloud_flags+=("--project=${PROJECT}")
   gcloud_flags+=('--quiet')
+
   gcloud_compute_args+=("--zone=${GCE_ZONE}")
 
   if (( ${DEBUG_MODE} )); then
@@ -450,6 +471,26 @@ function run_sanity_checks() {
     print_help
   fi
 
+  # Make sure the preemptible fraction could be a fraction
+  if [[ ! ${PREEMPTIBLE_FRACTION} =~ ^[0-1]?(\.[0-9]+)?$ ]]; then
+    logerror "Preemptible fraction '${PREEMPTIBLE_FRACTION}' not a fraction."
+    print_help
+  fi
+
+  # Make sure the preemptible fraction is in range.
+  local lt0=$(echo | awk -v x=${PREEMPTIBLE_FRACTION} '{print (x < 0) ? 1 : 0}')
+  local gt1=$(echo | awk -v x=${PREEMPTIBLE_FRACTION} '{print (x > 1) ? 1 : 0}')
+
+  if [[ $lt0 -eq 1 ]]; then
+    logerror "Preemptible fraction '${PREEMPTIBLE_FRACTION}' is less than 0.0"
+    print_help
+  fi
+
+  if [[ $gt1 -eq 1 ]]; then
+    logerror "Preemptible fraction '${PREEMPTIBLE_FRACTION}' greater than 1.0"
+    print_help
+  fi
+
   # Make sure the hostnames all abide by the PREFIX.
   local node=''
   for node in ${WORKERS[@]} ${MASTER_HOSTNAME?}; do
@@ -479,6 +520,16 @@ function run_sanity_checks() {
     fi
   fi
 
+  # Enforce maximum local-ssds per VM.
+  if (( ${WORKER_LOCAL_SSD_COUNT} > 4 )); then
+    logerror 'WORKER_LOCAL_SSD_COUNT can be a maximum of 4.'
+    print_help
+  fi
+  if (( ${MASTER_LOCAL_SSD_COUNT} > 4 )); then
+    logerror 'MASTER_LOCAL_SSD_COUNT can be a maximum of 4.'
+    print_help
+  fi
+
   # Make sure GCS connector is installed if it is the default FS
   if [[ "${DEFAULT_FS}" == 'gs' ]] && (( ! "${INSTALL_GCS_CONNECTOR}" )); then
     logerror 'INSTALL_GCS_CONNECTOR must 1 if DEFAULT_FS is gs.'
@@ -489,6 +540,15 @@ function run_sanity_checks() {
   if [[ "${DEFAULT_FS}" == 'hdfs' ]] && (( ! "${ENABLE_HDFS}" )); then
     logerror 'ENABLE_HDFS must 1 if DEFAULT_FS is hdfs.'
     print_help
+  fi
+
+  # Make sure preemptible is only used with gs
+  local gt0=$(echo | awk -v x=${PREEMPTIBLE_FRACTION} '{print (x > 0) ? 1 : 0}')
+  if [[ "${DEFAULT_FS}" != 'gs' ]]; then
+    if [[ "$gt0" -eq 1 ]]; then
+      logerror 'Preemptible VMs can only be used with GCS as the DEFAULT_FS.'
+      print_help
+    fi
   fi
 
   local scheme=${HADOOP_TARBALL_URI%%://*}
@@ -538,6 +598,18 @@ function run_sanity_checks() {
     fi
   fi
 
+  if [[ -z "${GCE_ZONE}" ]]; then
+    loginfo 'No zone provided; using default gcloud zone'
+    GCE_ZONE="$(gcloud config list compute/zone | grep zone | cut -d'=' -f2 | tr -d ' ')"
+    if [[ -n "${GCE_ZONE}" ]]; then
+      loginfo "Using project '${GCE_ZONE}'"
+      echo "GCE_ZONE=${GCE_ZONE}" >> ${OVERRIDES_FILE}
+    else
+      logerror 'Cannot find zone using gcloud.'
+      print_help
+    fi
+  fi
+
   if [[ -z "${WORKER_ATTACHED_PDS_TYPE}" ]]; then
     loginfo 'No WORKER_ATTACHED_PDS_TYPE provided; defaulting to pd-standard.'
     WORKER_ATTACHED_PDS_TYPE='pd-standard'
@@ -550,6 +622,23 @@ function run_sanity_checks() {
     MASTER_ATTACHED_PD_TYPE='pd-standard'
     echo "MASTER_ATTACHED_PD_TYPE=${MASTER_ATTACHED_PD_TYPE}" \
         >> ${OVERRIDES_FILE}
+  fi
+
+  if [[ -z "${GCE_MASTER_MACHINE_TYPE}" ]]; then
+    loginfo 'No explicit GCE_MASTER_MACHINE_TYPE provided; defaulting to' \
+        "value of GCE_MACHINE_TYPE: ${GCE_MACHINE_TYPE}"
+    GCE_MASTER_MACHINE_TYPE="${GCE_MACHINE_TYPE}"
+    echo "GCE_MASTER_MACHINE_TYPE=${GCE_MASTER_MACHINE_TYPE}" \
+        >> ${OVERRIDES_FILE}
+  fi
+
+  if (( MASTER_BOOT_DISK_SIZE_GB != 0 && MASTER_BOOT_DISK_SIZE_GB < 10 )); then
+    logerror 'MASTER_BOOT_DISK_SIZE_GB must be a minimum of 10.'
+    print_help
+  fi
+  if (( WORKER_BOOT_DISK_SIZE_GB != 0 && WORKER_BOOT_DISK_SIZE_GB < 10 )); then
+    logerror 'WORKER_BOOT_DISK_SIZE_GB must be a minimum of 10.'
+    print_help
   fi
 
   # TODO(dhuo): Possibly all "late variable bindings" could be generated here
@@ -687,14 +776,19 @@ function create_cluster() {
         sleep_for_api_ops
       done
     fi
-    loginfo "Creating attached master disk: ${MASTER_ATTACHED_PD}"
-    run_gcloud_compute_cmd \
-        disks create \
-        --size=${MASTER_ATTACHED_PD_SIZE_GB} \
-        --type=${MASTER_ATTACHED_PD_TYPE} \
-        ${MASTER_ATTACHED_PD} &
+
+    if ! (( ${SKIP_MASTER} )); then
+      loginfo "Creating attached master disk: ${MASTER_ATTACHED_PD}"
+      run_gcloud_compute_cmd \
+          disks create \
+          --size=${MASTER_ATTACHED_PD_SIZE_GB} \
+          --type=${MASTER_ATTACHED_PD_TYPE} \
+          ${MASTER_ATTACHED_PD} &
+      loginfo 'Done creating disks!'
+    else
+      loginfo 'Skipping master-disk creation because SKIP_MASTER is true.'
+    fi
     await_async_jobs 'disks create'
-    loginfo 'Done creating disks!'
   fi
 
   # Start workers and master.
@@ -709,34 +803,65 @@ function create_cluster() {
         await_async_jobs 'instances create (partial)'
         loginfo 'Done. Invoking next batch...'
       fi
+      local optional_disk_arg=''
       if (( ${USE_ATTACHED_PDS} )); then
-        local optional_disk_arg="--disk name=${WORKER_ATTACHED_PDS[${i}]} mode=rw"
+        optional_disk_arg+="--disk name=${WORKER_ATTACHED_PDS[${i}]},mode=rw "
       fi
+      if (( WORKER_BOOT_DISK_SIZE_GB > 0 )); then
+        optional_disk_arg+="--boot-disk-size=${WORKER_BOOT_DISK_SIZE_GB} "
+      fi
+      if (( ${WORKER_LOCAL_SSD_COUNT} > 0 )); then
+        for ((j = 0; j < WORKER_LOCAL_SSD_COUNT; j++)); do
+          optional_disk_arg+='--local-ssd interface=SCSI '
+        done
+      fi
+
+      local optional_preemptible_arg=""
+      if (( ${i} < NUM_PREEMPTIBLE )); then
+        optional_preemptible_arg="--preemptible"
+      fi
+
       run_gcloud_compute_cmd \
           instances create \
            ${WORKERS[${i}]} \
           --machine-type=${GCE_MACHINE_TYPE} \
+          ${optional_preemptible_arg} \
           --image=${GCE_IMAGE} \
           --network=${GCE_NETWORK} \
-          --scopes ${GCE_SERVICE_ACCOUNT_SCOPES[@]//,/ } \
+          --tags=${GCE_TAGS} \
+          --scopes $(export IFS=,; echo "${GCE_SERVICE_ACCOUNT_SCOPES[*]}";) \
           --boot-disk-type=pd-standard \
           ${optional_disk_arg} &
       sleep_for_api_ops
     done
   fi
-  loginfo "Creating master instance: ${MASTER_HOSTNAME}"
-  if (( ${USE_ATTACHED_PDS} )); then
-    optional_disk_arg="--disk name=${MASTER_ATTACHED_PD} mode=rw"
+  if ! (( ${SKIP_MASTER} )); then
+    loginfo "Creating master instance: ${MASTER_HOSTNAME}"
+    local optional_disk_arg=''
+    if (( ${USE_ATTACHED_PDS} )); then
+      optional_disk_arg+="--disk name=${MASTER_ATTACHED_PD},mode=rw "
+    fi
+    if (( MASTER_BOOT_DISK_SIZE_GB > 0 )); then
+      optional_disk_arg+="--boot-disk-size=${MASTER_BOOT_DISK_SIZE_GB} "
+    fi
+    if (( ${MASTER_LOCAL_SSD_COUNT} > 0 )); then
+      for ((j = 0; j < MASTER_LOCAL_SSD_COUNT; j++)); do
+        optional_disk_arg+='--local-ssd interface=SCSI '
+      done
+    fi
+    run_gcloud_compute_cmd \
+        instances create \
+        ${MASTER_HOSTNAME} \
+        --machine-type=${GCE_MASTER_MACHINE_TYPE} \
+        --image=${GCE_IMAGE} \
+        --network=${GCE_NETWORK} \
+        --tags=${GCE_TAGS} \
+        --scopes $(export IFS=,; echo "${GCE_SERVICE_ACCOUNT_SCOPES[*]}";) \
+        --boot-disk-type=pd-standard \
+        ${optional_disk_arg} &
+  else
+    loginfo 'Skipping master creation because SKIP_MASTER is true.'
   fi
-  run_gcloud_compute_cmd \
-      instances create \
-      ${MASTER_HOSTNAME} \
-      --machine-type=${GCE_MACHINE_TYPE} \
-      --image=${GCE_IMAGE} \
-      --network=${GCE_NETWORK} \
-      --scopes ${GCE_SERVICE_ACCOUNT_SCOPES[@]//,/ } \
-      --boot-disk-type=pd-standard \
-      ${optional_disk_arg} &
   await_async_jobs 'instances create'
 
   loginfo 'Instances all created. Entering polling loop to wait for ssh-ability'
@@ -752,7 +877,11 @@ function create_cluster() {
     wait_for_ssh ${NODE} &
     sleep_for_api_ops
   done
-  wait_for_ssh ${MASTER_HOSTNAME} &
+  if ! (( ${SKIP_MASTER} )); then
+    wait_for_ssh ${MASTER_HOSTNAME} &
+  else
+    loginfo 'Skipping wait_for_ssh because SKIP_MASTER is true.'
+  fi
 
   # Wait for all nodes to be ready.
   await_async_jobs 'wait_for_ssh'
@@ -778,8 +907,12 @@ function delete_cluster() {
       sleep_for_api_ops
     done
   fi
-  run_gcloud_compute_cmd instances delete \
-      --delete-disks=boot ${MASTER_HOSTNAME} &
+  if ! (( ${SKIP_MASTER} )); then
+    run_gcloud_compute_cmd instances delete \
+        --delete-disks=boot ${MASTER_HOSTNAME} &
+  else
+    loginfo 'Skipping master deletion because SKIP_MASTER is true.'
+  fi
   await_async_jobs 'instances delete'
   loginfo 'Done deleting VMs!'
 
@@ -798,8 +931,12 @@ function delete_cluster() {
         sleep_for_api_ops
       done
     fi
-    loginfo "Deleting attached master disk: ${MASTER_ATTACHED_PD}"
-    run_gcloud_compute_cmd disks delete ${MASTER_ATTACHED_PD} &
+    if ! (( ${SKIP_MASTER} )); then
+      loginfo "Deleting attached master disk: ${MASTER_ATTACHED_PD}"
+      run_gcloud_compute_cmd disks delete ${MASTER_ATTACHED_PD} &
+    else
+      loginfo 'Skipping master-disk deletion because SKIP_MASTER is true.'
+    fi
     await_async_jobs 'disks delete'
     loginfo 'Done deleting disks!'
   fi
@@ -924,11 +1061,31 @@ function generate_config_file() {
       exit 1
     fi
   fi
-  loginfo "Creating config file '${GENERATE_CONFIG_FILENAME}' with contents:"
-  cat ${OVERRIDES_FILE}
 
-  cp ${OVERRIDES_FILE} ${GENERATE_CONFIG_FILENAME}
-  loginfo "To deploy: ./bdutil deploy -e ${GENERATE_CONFIG_FILENAME}"
+  # Add each ENV_FILE as an explicit "import_env" at the top of the generated
+  # config file. Use fully-resolved names so that the same generated config
+  # works from any directory. Start at index '1' since our resolution of
+  # ENV_FILES will include the base bdutil_env.sh at index 0.
+  cp /dev/null ${GENERATE_CONFIG_FILENAME}
+  for ENV_FILE in "${ENV_FILES[@]:1}"; do
+    local resolved_env_file=$(
+        python -c "import os.path; print os.path.realpath('${ENV_FILE}')")
+    echo "import_env ${resolved_env_file}" >> ${GENERATE_CONFIG_FILENAME}
+  done
+  cat ${OVERRIDES_FILE} >> ${GENERATE_CONFIG_FILENAME}
+
+  loginfo "Created config file '${GENERATE_CONFIG_FILENAME}' with contents:"
+  cat ${GENERATE_CONFIG_FILENAME}
+  loginfo "To deploy: ./bdutil -e ${GENERATE_CONFIG_FILENAME} deploy"
+}
+
+# Copy the contents of all listed input files to STDOUT, appending a
+# newline to each file.
+function write_files_with_newlines() {
+  for file in $@; do
+    cat "$file"
+    echo ""
+  done
 }
 
 # Generate grouped scripts with resolved environment files and
@@ -940,8 +1097,8 @@ function generate_scripts_from_command_groups() {
   cat <<EOF > "${SCRIPT_TMPDIR}/hadoop-env-setup.sh"
 #!/bin/bash
 set -e -a
-$(cat ${ENV_FILES[@]})
-$(cat ${OVERRIDES_FILE})
+$(write_files_with_newlines ${ENV_FILES[@]})
+$(write_files_with_newlines ${OVERRIDES_FILE})
 evaluate_late_variable_bindings
 set +a
 # Put the helper functions into hadoop-env-setup.sh so they can be accessed globally
@@ -1072,8 +1229,12 @@ function run_distributed_command() {
     done
   fi
   if [[ -n "${master_cmd}" ]] && [[ "${TARGET}" != workers ]]; then
-    loginfo "Invoking on master: ${master_cmd}"
-    run_remote_cmd ${MASTER_HOSTNAME} "${master_cmd}" "${master_logname}" &
+    if ! (( ${SKIP_MASTER} )); then
+      loginfo "Invoking on master: ${master_cmd}"
+      run_remote_cmd ${MASTER_HOSTNAME} "${master_cmd}" "${master_logname}" &
+    else
+      loginfo 'Skipping master command because SKIP_MASTER is true.'
+    fi
   fi
   # Wait for all the async stuff to finish before moving on.
   await_async_jobs 'ssh'
@@ -1338,6 +1499,11 @@ function parse_input() {
         echo "GCE_MACHINE_TYPE=$2" >> ${OVERRIDES_FILE}
         shift 2
         ;;
+      -M|--master_machine_type)
+        validate_argument $1 $2
+        echo "GCE_MASTER_MACHINE_TYPE=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
       --master_attached_pd_size_gb)
         validate_argument $1 $2
         echo "MASTER_ATTACHED_PD_SIZE_GB=$2" >> ${OVERRIDES_FILE}
@@ -1348,9 +1514,24 @@ function parse_input() {
         echo "MASTER_ATTACHED_PD_TYPE=$2" >> ${OVERRIDES_FILE}
         shift 2
         ;;
+      --master_boot_disk_size_gb)
+        validate_argument $1 $2
+        echo "MASTER_BOOT_DISK_SIZE_GB=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
+      --master_local_ssd_count)
+        validate_argument $1 $2
+        echo "MASTER_LOCAL_SSD_COUNT=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
       --network)
         validate_argument $1 $2
         echo "GCE_NETWORK=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
+      --tags)
+        validate_argument $1 $2
+        echo "GCE_TAGS=$2" >> ${OVERRIDES_FILE}
         shift 2
         ;;
       -n|--num_workers)
@@ -1366,6 +1547,12 @@ function parse_input() {
           echo "OLD_HOSTNAME_SUFFIXES=true" >> ${OVERRIDES_FILE}
           shift
         fi
+        ;;
+      --preemptible)
+        validate_argument $1 $2
+
+        echo "PREEMPTIBLE_FRACTION=$2" >> ${OVERRIDES_FILE}
+        shift 2
         ;;
       -P|--prefix)
         validate_argument $1 $2
@@ -1405,6 +1592,16 @@ function parse_input() {
       --worker_attached_pds_type)
         validate_argument $1 $2
         echo "WORKER_ATTACHED_PDS_TYPE=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
+      --worker_local_ssd_count)
+        validate_argument $1 $2
+        echo "WORKER_LOCAL_SSD_COUNT=$2" >> ${OVERRIDES_FILE}
+        shift 2
+        ;;
+      --worker_boot_disk_size_gb)
+        validate_argument $1 $2
+        echo "WORKER_BOOT_DISK_SIZE_GB=$2" >> ${OVERRIDES_FILE}
         shift 2
         ;;
       -z|--zone)
@@ -1624,7 +1821,16 @@ function main() {
   esac
 }
 
-BDUTIL_DIR="$(dirname $0)"
+# Resolve the script till it's not a symlink anymore
+BDUTIL_SCRIPT=$0
+while [ -h "$BDUTIL_SCRIPT" ]; do
+  DIR="$( cd -P "$( dirname "$BDUTIL_SCRIPT" )" && pwd )"
+  BDUTIL_SCRIPT="$(readlink "$BDUTIL_SCRIPT")"
+  [[ $BDUTIL_SCRIPT != /* ]] && BDUTIL_SCRIPT="$DIR/$BDUTIL_SCRIPT"
+done
+
+# Get the directory name of the resolved script
+BDUTIL_DIR="$(dirname $BDUTIL_SCRIPT)"
 
 # Call main function, unless running unit tests
 if [[ ! "${BDUTIL_RUN_UNIT_TEST}" ]]; then

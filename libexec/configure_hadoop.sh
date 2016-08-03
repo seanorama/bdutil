@@ -20,7 +20,7 @@
 set -e
 
 # Set general Hadoop environment variables
-JAVA_HOME=$(readlink -f $(which java) | sed 's|/bin/java$||')
+JAVA_HOME="$(get_java_home)"
 # Place HADOOP_LOG_DIR in /hadoop (possibly on larger non-boot-disk)
 HADOOP_LOG_DIR=/hadoop/logs
 # Used for hadoop.tmp.dir
@@ -174,4 +174,13 @@ if [[ -f yarn-template.xml ]]; then
         --value 'true' \
         --clobber
   fi
+fi
+
+if [[ -f capacity-scheduler-template.xml ]]; then
+  bdconfig merge_configurations \
+      --configuration_file ${HADOOP_CONF_DIR}/capacity-scheduler.xml \
+      --source_configuration_file capacity-scheduler-template.xml \
+      --resolve_environment_variables \
+      --create_if_absent \
+      --clobber
 fi

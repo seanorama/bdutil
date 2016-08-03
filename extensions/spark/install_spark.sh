@@ -35,6 +35,7 @@ fi
 
 SPARK_TARBALL=${SPARK_TARBALL_URI##*/}
 SPARK_MAJOR_VERSION=$(sed 's/spark-\([0-9]*\).*/\1/' <<<${SPARK_TARBALL})
+SPARK_MINOR_VERSION=$(sed 's/spark-[0-9]*.\([0-9]*\).*/\1/' <<<${SPARK_TARBALL})
 gsutil cp ${SPARK_TARBALL_URI} /home/hadoop/${SPARK_TARBALL}
 tar -C /home/hadoop -xzvf /home/hadoop/${SPARK_TARBALL}
 mv /home/hadoop/spark*/ ${SPARK_INSTALL_DIR}
@@ -80,6 +81,12 @@ SPARK_DAEMON_MEMORY=$(python -c \
 SPARK_EXECUTOR_MEMORY=$(python -c \
     "print int(${TOTAL_MEM} * ${SPARK_EXECUTOR_MEMORY_FRACTION})")
 
+# Give "client" processes 1/4 of available memory; since this piece doesn't
+# by default run in a strict container, we're allowing it to be a bit
+# oversubscribed. This matches our HADOOP_CLIENT_OPTS setting for now.
+SPARK_DRIVER_MEM_MB=$(python -c "print int(${TOTAL_MEM} / 4)")
+SPARK_DRIVER_MAX_RESULT_MB=$(python -c "print int(${SPARK_DRIVER_MEM_MB} / 2)")
+
 # If YARN is setup. Shrink memory to fit on NodeManagers.
 if (( ${HADOOP_VERSION} > 1 )); then
   set +o nounset
@@ -122,7 +129,7 @@ export SPARK_DAEMON_MEMORY=${SPARK_DAEMON_MEMORY}m
 export SPARK_WORKER_DIR=${SPARK_WORKDIR}
 export SPARK_LOCAL_DIRS=${SPARK_TMPDIR}
 export SPARK_LOG_DIR=${SPARK_LOG_DIR}
-export SPARK_CLASSPATH=\$SPARK_CLASSPATH:${LOCAL_GCS_JAR}
+export SPARK_DIST_CLASSPATH+=:\$(${HADOOP_INSTALL_DIR}/bin/hadoop classpath)
 EOF
 
 # For Spark 0.9.1 and older, Spark properties must be passed in programmatically
@@ -138,7 +145,20 @@ export SPARK_JAVA_OPTS="-Dspark.local.dir=${SPARK_TMPDIR} \${SPARK_JAVA_OPTS}"
 # Will be ingored if not running on YARN
 export SPARK_JAVA_OPTS="-Dspark.yarn.executor.memoryOverhead=\
 ${SPARK_YARN_EXECUTOR_MEMORY_OVERHEAD} \${SPARK_JAVA_OPTS}"
+
+# Even though SPARK_CLASSPATH is deprecated for 1.x+, it's still necessary for
+# 0.x, where there's no SPARK_DIST_CLASSPATH.
+export SPARK_CLASSPATH+=:${LOCAL_GCS_JAR}
 EOF
+elif (( ${SPARK_MINOR_VERSION} >= 5 || ${SPARK_MAJOR_VERSION} > 1 )); then
+  # For Spark 1.5.0 and newer, the SparkSQL component is by default compiled
+  # with Hive 1.2.1 (up from Hive 0.13.x), which is picky about reported
+  # permissions.
+  bdconfig set_property \
+      --configuration_file ${HADOOP_CONF_DIR}/core-site.xml \
+      --name 'fs.gs.reported.permissions' \
+      --value '733' \
+      --noclobber
 fi
 
 if [[ "${SPARK_MASTER}" != 'default' ]]; then
@@ -146,13 +166,31 @@ if [[ "${SPARK_MASTER}" != 'default' ]]; then
   echo "spark.master ${SPARK_MASTER}" >> ${SPARK_INSTALL_DIR}/conf/spark-defaults.conf
 fi
 
+SPARK_EVENTLOG_DIR="gs://${CONFIGBUCKET}/spark-eventlog-base/${MASTER_HOSTNAME}"
+if [[ "$(hostname -s)" == "${MASTER_HOSTNAME}" ]]; then
+  source hadoop_helpers.sh
+  HDFS_SUPERUSER=$(get_hdfs_superuser)
+  DFS_CMD="sudo -i -u ${HDFS_SUPERUSER} hadoop fs"
+  if ! ${DFS_CMD} -stat ${SPARK_EVENTLOG_DIR}; then
+    if (( ${HADOOP_VERSION} > 1 )); then
+      ${DFS_CMD} -mkdir -p ${SPARK_EVENTLOG_DIR}
+    else
+      ${DFS_CMD} -mkdir ${SPARK_EVENTLOG_DIR}
+    fi
+  fi
+fi
+
 # Misc Spark Properties that will be loaded by spark-submit.
-# TODO(user): Instead of single extraClassPath, use a lib directory.
 cat << EOF >> ${SPARK_INSTALL_DIR}/conf/spark-defaults.conf
 spark.eventLog.enabled true
-spark.eventLog.dir gs://${CONFIGBUCKET}/spark-eventlog-base/${MASTER_HOSTNAME}
+spark.eventLog.dir ${SPARK_EVENTLOG_DIR}
+
 spark.executor.memory ${SPARK_EXECUTOR_MEMORY}m
 spark.yarn.executor.memoryOverhead ${SPARK_YARN_EXECUTOR_MEMORY_OVERHEAD}
+
+spark.driver.memory ${SPARK_DRIVER_MEM_MB}m
+spark.driver.maxResultSize ${SPARK_DRIVER_MAX_RESULT_MB}m
+spark.akka.frameSize 512
 EOF
 
 # Add the spark 'bin' path to the .bashrc so that it's easy to call 'spark'
@@ -161,3 +199,14 @@ add_to_path_at_login "${SPARK_INSTALL_DIR}/bin"
 
 # Assign ownership of everything to the 'hadoop' user.
 chown -R hadoop:hadoop /home/hadoop/
+
+# Configure Spark to work with Cloud Bigtable
+if [ ! -z "${ALPN_CLASSPATH:-}" ]; then 
+    # Setup bootstrap classpath
+    echo -e "spark.executor.extraJavaOptions -Xbootclasspath/p:${ALPN_CLASSPATH}" >> "${SPARK_INSTALL_DIR}/conf/spark-defaults.conf"
+    echo -e "spark.driver.extraJavaOptions -Xbootclasspath/p:${ALPN_CLASSPATH}" >> "${SPARK_INSTALL_DIR}/conf/spark-defaults.conf"
+    if [ -e "${SPARK_INSTALL_DIR}/bin/utils.sh" ]; then
+	# Spark-shell: include ALPN on bootstrap classpath (needed for Spark 1.3, not 1.4)
+	sed -i "/SUBMISSION_OPTS=()/a SUBMISSION_OPTS+=( --driver-java-options -Xbootclasspath/p:${ALPN_CLASSPATH} ) " "${SPARK_INSTALL_DIR}/bin/utils.sh"
+    fi
+fi
